@@ -487,3 +487,24 @@ body { transition: background-color 0.28s ease, color 0.28s ease; }
 .row.changed::after { top: 50%; transform: translateY(-50%); right: 8px; }
 @keyframes changedPulse { from { transform: scale(0.6); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 .row.changed::after { animation: none; }
+
+/* ---------- R3修：磨砂材质浮层 + 变更角标计数 + 排版呼吸 ---------- */
+/* 浮层磨砂玻璃——叠在内容上时透出底下内容的模糊，真 mac app 的材质信号（CDP 可见，非依赖 OS vibrancy）*/
+.cmdk-panel { background: color-mix(in srgb, var(--bg-2) 82%, transparent); -webkit-backdrop-filter: blur(24px) saturate(1.5); backdrop-filter: blur(24px) saturate(1.5); }
+.context-menu { background: color-mix(in srgb, var(--bg-2) 85%, transparent); -webkit-backdrop-filter: blur(20px) saturate(1.4); backdrop-filter: blur(20px) saturate(1.4); }
+.input-dialog { background: color-mix(in srgb, var(--bg-2) 85%, transparent); -webkit-backdrop-filter: blur(20px) saturate(1.4); backdrop-filter: blur(20px) saturate(1.4); }
+
+/* 变更角标显示计数（改·N），文本由 JS 写进 data-changed */
+.item.changed::after, .row.changed::after { content: attr(data-changed); }
+.row.changed::after { animation: changedPulse 0.45s ease; }
+/* 刚被 agent 写过的「呼吸」一下，强化「看 agent 干活」的核心叙事时刻 */
+.item.changed, .row.changed { animation: changedBreath 1.6s ease 1; }
+@keyframes changedBreath {
+  0% { box-shadow: inset 0 0 0 1.5px var(--accent); }
+  45% { box-shadow: inset 0 0 0 2.5px var(--accent), 0 0 14px var(--accent-soft); }
+  100% { box-shadow: inset 0 0 0 1.5px var(--accent); }
+}
+
+/* 排版呼吸：网格项更松、文件名行高更舒展 */
+.grid .item { padding: 14px 10px 12px; }
+.grid .fname { line-height: 1.4; }

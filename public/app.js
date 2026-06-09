@@ -252,16 +252,20 @@ function thumbHtml(e) {
 }
 function gridItem(e, i) {
   const el = document.createElement('div');
-  el.className = 'item' + (e.hidden ? ' hidden-file' : '') + (state.selected === e.path ? ' selected' : '') + (state.changed && state.changed.has(e.name) ? ' changed' : '');
+  const chg = state.changed && state.changed.get(e.name);
+  el.className = 'item' + (e.hidden ? ' hidden-file' : '') + (state.selected === e.path ? ' selected' : '') + (chg ? ' changed' : '');
   el.dataset.idx = i;
+  if (chg) { el.dataset.changed = chg.count > 1 ? '改·' + chg.count : '改'; if (chg.files.size) el.title = '刚变更：\n' + [...chg.files].join('\n'); }
   el.innerHTML = `<div class="icon">${thumbHtml(e)}</div><div class="fname">${escapeHtml(e.name)}</div>${favBtn(e)}`;
   bindItem(el, e);
   return el;
 }
 function listRow(e, i) {
   const el = document.createElement('div');
-  el.className = 'row' + (e.hidden ? ' hidden-file' : '') + (state.selected === e.path ? ' selected' : '') + (state.changed && state.changed.has(e.name) ? ' changed' : '');
+  const chgR = state.changed && state.changed.get(e.name);
+  el.className = 'row' + (e.hidden ? ' hidden-file' : '') + (state.selected === e.path ? ' selected' : '') + (chgR ? ' changed' : '');
   el.dataset.idx = i;
+  if (chgR) { el.dataset.changed = chgR.count > 1 ? '改·' + chgR.count : '改'; if (chgR.files.size) el.title = '刚变更：\n' + [...chgR.files].join('\n'); }
   el.innerHTML = `<div class="icon">${e.kind === 'image' ? `<img class="thumb-sm" loading="lazy" src="/api/raw?path=${encodeURIComponent(e.path)}">` : `<span class="svg-icon">${iconSvg(e, 18)}</span>`}</div>
     <div class="fname">${escapeHtml(e.name)}</div>
     <div class="meta">${fmtTime(e.mtime)}</div>
@@ -1120,14 +1124,28 @@ if (window.fanboxPty) {
 // 文件变化 → 自动刷新列表（看着 agent 干活）；编辑中不动预览，避免吞掉未保存内容
 if (window.fanboxFs) {
   let rt = null;
-  state.changed = new Set();
+  state.changed = new Map(); // 顶层名 → { count, files:Set, ts }
+  let sweep = null;
+  const scheduleSweep = () => {
+    if (sweep) return;
+    sweep = setInterval(() => {
+      const now = Date.now(); let dirty = false;
+      for (const [k, v] of state.changed) { if (now - v.ts > 4500) { state.changed.delete(k); dirty = true; } }
+      if (!state.changed.size) { clearInterval(sweep); sweep = null; }
+      if (dirty) renderFiles();
+    }, 1000); // 单一清理定时器，避免大批量变更时堆积成千上万个 timer
+  };
   window.fanboxFs.onChanged(({ dir, filename }) => {
     if (dir !== state.cwd || state.recentMode) return;
-    // 高亮被 agent 改动的文件：取相对路径的顶层名（递归监听下可能是 src/foo.js → src）
+    // 高亮被 agent 改动的项：递归监听下 src/foo.js 归到顶层 src，并累计计数 + 记子路径供 tooltip 定位
     if (filename) {
-      const top = String(filename).split('/')[0];
-      state.changed.add(top);
-      setTimeout(() => { state.changed.delete(top); renderFiles(); }, 4500);
+      const sub = String(filename);
+      const top = sub.split('/')[0];
+      let rec = state.changed.get(top);
+      if (!rec) { rec = { count: 0, files: new Set(), ts: 0 }; state.changed.set(top, rec); }
+      rec.count++; rec.ts = Date.now();
+      if (rec.files.size < 8 && sub !== top) rec.files.add(sub);
+      scheduleSweep();
     }
     clearTimeout(rt);
     rt = setTimeout(async () => {
