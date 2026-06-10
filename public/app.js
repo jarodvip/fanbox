@@ -546,14 +546,20 @@ function csvTable(text, delim) {
   h += '</tbody></table></div>';
   return h;
 }
+// 把绝对路径编码成 /fs/ 端点 URL，逐段 encode 以保留目录层级（相对引用按段解析）
+function fsUrl(p, mtime) {
+  return '/fs/' + p.split('/').filter(Boolean).map(encodeURIComponent).join('/') + '?v=' + (mtime || 0);
+}
 function renderHtmlPreview(data, meta) {
   const body = $('#preview-body');
   body.innerHTML = meta +
     `<div class="pv-toolbar"><button id="html-toggle" class="ghost-btn">查看源码</button><button id="html-browser" class="ghost-btn">${ic('globe', 'currentColor', 13)} 浏览器打开（看完整交互）</button></div>` +
-    // 只给 allow-scripts，不给 allow-same-origin：让预览的 HTML 落到独立 origin，
+    // src 指到 /fs/ 路径镜像端点，页面里的相对引用（./img.png、子目录）才能按所在目录解析；
+    // srcdoc 没有 base URL，本地图片/CSS 全是裂的。
+    // 只给 allow-scripts，不给 allow-same-origin：sandbox 让文档落到 opaque origin，
     // 否则它的脚本可经 window.parent 摸到 preload 暴露的 fanboxPty.spawn → 预览一个文件就能 RCE。
     // 需要完整同源交互的页面走「浏览器打开」按钮。
-    `<iframe class="iframe-preview" sandbox="allow-scripts" srcdoc="${escapeHtml(data.content || '')}"></iframe>`;
+    `<iframe class="iframe-preview" sandbox="allow-scripts" src="${fsUrl(data.path, data.mtime)}"></iframe>`;
   let src = false;
   $('#html-browser').onclick = () => openWith(data.path, 'default');
   $('#html-toggle').onclick = () => {
