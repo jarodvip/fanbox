@@ -479,19 +479,20 @@ async function renamePath(p, newName) {
   return { ok: true, path: dst };
 }
 
-// ---------- AI 整理：AI 提案、人批准、翻箱执行（方案见 docs/AI整理目录-设计方案.md）----------
-// AI 只看元数据出建议（不读内容、不碰文件系统）；执行由翻箱完成并写回滚日志，30 天内可整体撤销。
+// ---------- AI 整理：备料 + 在内嵌终端拉起交互式 agent（v2，对话式；v1 headless 提案已废弃）----------
+// 翻箱不再后台跑 claude -p：把整理偏好、过往整理历史、工作约定写成 brief 文件，
+// 前端在内嵌终端启动 claude/codex，方案摊给用户对话确认后由 agent 动手。
+// 约定：agent 每批移动追加写 ORGANIZE_LOG_DIR 回滚日志（撤销在对话里完成）、收尾把新学到的偏好沉淀进 prefs 文件。
 const ORGANIZE_LOG_DIR = path.join(CONFIG_DIR, 'organize-log');
-const DEFAULT_ORGANIZE_STRATEGY = `你是文件整理助手，给目标文件夹的散落文件提整理方案。规则：
-- 只归档不删除：过时/低频的文件移入 _archive/ 下的语义子目录（如 _archive/截图/2026-06/）
-- 体积超过 50MB 的视频文件不要归档，放进 uncertain 单独列出
+const ORGANIZE_PREFS_FILE = path.join(CONFIG_DIR, 'organize-prefs.md');
+const ORGANIZE_BRIEF_FILE = path.join(CONFIG_DIR, 'organize-brief.md');
+const DEFAULT_ORGANIZE_STRATEGY = `- 默认归档：过时/低频的文件移入 _archive/ 下的语义子目录（如 _archive/截图/2026-06/）
 - 同一主题的散文件归进语义明确的项目文件夹（项目制：一个项目一个文件夹，按需建议新文件夹）
+- 归档之外，单独提一份「建议删除」清单（什么算该删由你判断：明显垃圾、可再生成的产物、过期大文件……），逐条给理由
+- 删除须用户逐条点头；确认后移入废纸篓 ~/.Trash/（不直接 rm），并照常记进回滚日志
 - 最近 7 天内有动静的文件视为正在进行的工作，不要动
 - 文件夹一律不动，只整理松散文件
-- 拿不准的一律进 uncertain，宁可少动不要乱动`;
-const ORGANIZE_OUTPUT_SPEC = `只输出一个 JSON 对象，不要任何其他文字、不要 markdown 代码围栏，结构：
-{"moves":[{"from":"文件名","to":"目标相对目录/","reason":"一句话理由"}],"uncertain":[{"from":"文件名","hint":"为什么拿不准"}]}
-from 必须是清单里的文件名原样；to 必须是相对当前文件夹的目录路径、以 / 结尾、不得包含 ..`;
+- 拿不准的单独列出来问，宁可少动不要乱动`;
 
 async function findAgentBin(name) {
   // GUI 启动的 app 没有用户 shell 的 PATH，走登录 shell 找一次绝对路径
@@ -503,119 +504,67 @@ async function findAgentBin(name) {
   });
 }
 
-async function organizeConfig() {
-  const cfg = await readConfig();
-  const [claudeBin, codexBin] = await Promise.all([findAgentBin('claude'), findAgentBin('codex')]);
-  return {
-    ok: true,
-    strategy: cfg.organizeStrategy || DEFAULT_ORGANIZE_STRATEGY,
-    defaultStrategy: DEFAULT_ORGANIZE_STRATEGY,
-    engine: cfg.organizeEngine || (claudeBin ? 'claude' : 'codex'),
-    engines: { claude: !!claudeBin, codex: !!codexBin },
-  };
-}
-
-// 从引擎输出里抠出提案 JSON：优先 ```json 围栏，否则找含 "moves" 的首个平衡大括号块
-function extractProposal(text) {
-  const fence = text.match(/```json\s*([\s\S]*?)```/);
-  if (fence) { try { return JSON.parse(fence[1]); } catch { /* 落到通用路径 */ } }
-  for (let i = text.indexOf('{'); i !== -1; i = text.indexOf('{', i + 1)) {
-    let depth = 0;
-    for (let j = i; j < text.length; j++) {
-      if (text[j] === '{') depth++;
-      else if (text[j] === '}') { depth--; if (depth === 0) {
-        const cand = text.slice(i, j + 1);
-        if (cand.includes('"moves"')) { try { return JSON.parse(cand); } catch { /* 继续找 */ } }
-        break;
-      } }
-    }
-  }
-  return null;
-}
-
-async function organizeScan(b) {
-  const dir = resolvePath(b.path);
-  let names;
-  try { names = await fsp.readdir(dir, { withFileTypes: true }); } catch (e) { return { ok: false, error: '读取失败：' + e.message }; }
-  const now = Date.now();
-  const items = [];
-  for (const d of names) {
-    if (d.name.startsWith('.')) continue;
-    if (d.isDirectory()) continue; // 方案约定：只整理松散文件
-    let st; try { st = await fsp.lstat(path.join(dir, d.name)); } catch { continue; }
-    if (!st.isFile()) continue;
-    items.push({ name: d.name, kind: kindOf(d.name, false), sizeMB: Math.round(st.size / 1048576 * 10) / 10, daysOld: Math.round((now - st.mtimeMs) / 86400000) });
-  }
-  if (!items.length) return { ok: false, error: '这里没有可整理的松散文件（文件夹和隐藏文件不动）' };
-  if (items.length > 400) return { ok: false, error: `松散文件 ${items.length} 个，超过单次 400 的上限——先用占用透视清掉大头，或分子目录整理` };
-  const existingDirs = names.filter((d) => d.isDirectory() && !d.name.startsWith('.')).map((d) => d.name).slice(0, 60);
-  const cfg = await readConfig();
-  const engine = b.engine || cfg.organizeEngine || 'claude';
-  const strategy = b.strategy || cfg.organizeStrategy || DEFAULT_ORGANIZE_STRATEGY;
-  // 顺手记住这次的引擎和策略（用户可能改过）
-  await updateConfig((c) => { c.organizeEngine = engine; c.organizeStrategy = strategy; return c; });
-  const bin = await findAgentBin(engine);
-  if (!bin) return { ok: false, error: `找不到 ${engine} 命令` };
-  const prompt = `${strategy}\n\n${ORGANIZE_OUTPUT_SPEC}\n\n当前文件夹已有的子目录（可作归类目标）：${JSON.stringify(existingDirs)}\n\n文件清单（daysOld=距上次修改天数）：\n${JSON.stringify(items)}`;
-  // prompt 走 stdin 并关闭：挂着的 stdin 管道会让 CLI 干等，超长清单也不适合塞 argv
-  const args = engine === 'codex' ? ['exec', '--skip-git-repo-check', '-'] : ['-p'];
-  const out = await new Promise((resolve, reject) => {
-    const cp = execFile(bin, args, { cwd: dir, timeout: 240000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, PATH: `${path.dirname(bin)}:${process.env.PATH || '/usr/bin:/bin'}` } },
-      (err, stdout, stderr) => (err ? reject(new Error(String(stderr || err.message).slice(0, 300))) : resolve(String(stdout))));
-    cp.stdin.end(prompt);
-  }).catch((e) => ({ __err: e.message }));
-  if (out && out.__err) return { ok: false, error: `${engine} 跑挂了：${out.__err}` };
-  const prop = extractProposal(out);
-  if (!prop || !Array.isArray(prop.moves)) return { ok: false, error: `${engine} 的输出解析不出整理提案，再试一次或换引擎` };
-  // 服务端先过一遍安全网：from 必须真实存在的松散文件，to 必须是 .. 不出界的相对目录
-  const nameSet = new Set(items.map((i) => i.name));
-  const moves = (prop.moves || []).filter((m) => m && nameSet.has(m.from) && typeof m.to === 'string' && m.to && !m.to.includes('..') && !path.isAbsolute(m.to)).slice(0, 400);
-  const uncertain = (prop.uncertain || []).filter((u) => u && nameSet.has(u.from)).slice(0, 100);
-  return { ok: true, dir, engine, moves, uncertain, scanned: items.length };
-}
-
-async function organizeApply(b) {
-  const dir = resolvePath(b.path);
-  const moves = Array.isArray(b.moves) ? b.moves : [];
-  if (!moves.length) return { ok: false, error: '没有勾选任何条目' };
-  const done = [], failed = [];
-  for (const m of moves) {
-    if (!m || typeof m.from !== 'string' || typeof m.to !== 'string' || m.from.includes('/') || m.to.includes('..') || path.isAbsolute(m.to)) { failed.push({ ...m, error: '非法条目' }); continue; }
-    const r = await movePath(path.join(dir, m.from), path.join(dir, m.to));
-    if (r.ok) done.push({ from: path.join(dir, m.from), to: r.path });
-    else failed.push({ ...m, error: r.error });
-  }
-  let logFile = null;
-  if (done.length) {
-    await fsp.mkdir(ORGANIZE_LOG_DIR, { recursive: true });
-    logFile = path.join(ORGANIZE_LOG_DIR, `${Date.now()}.json`);
-    await fsp.writeFile(logFile, JSON.stringify({ dir, at: Date.now(), moves: done }, null, 2), 'utf8');
-    // 顺手清 30 天前的旧回滚日志
+// 最近几次整理日志的一句话摘要，给 agent 当历史参照（日志由 agent 按 brief 约定写入）
+async function organizeHistory() {
+  let files = [];
+  try { files = (await fsp.readdir(ORGANIZE_LOG_DIR)).filter((f) => f.endsWith('.json')); } catch { return ''; }
+  files.sort().reverse();
+  const lines = [];
+  for (const f of files.slice(0, 3)) {
     try {
-      for (const f of await fsp.readdir(ORGANIZE_LOG_DIR)) {
-        const t = Number(f.replace('.json', ''));
-        if (t && Date.now() - t > 30 * 86400000) await fsp.unlink(path.join(ORGANIZE_LOG_DIR, f)).catch(() => {});
-      }
-    } catch { /* */ }
+      const log = JSON.parse(await fsp.readFile(path.join(ORGANIZE_LOG_DIR, f), 'utf8'));
+      const m0 = (log.moves || [])[0];
+      const sample = m0 ? `（如 ${path.basename(m0.from)} → ${path.relative(log.dir, m0.to)}）` : '';
+      lines.push(`- ${new Date(log.at).toLocaleString('zh-CN')} 整理过 ${log.dir}，移动 ${(log.moves || []).length} 项${sample}`);
+    } catch { /* 坏日志跳过 */ }
   }
-  return { ok: true, moved: done.length, failed, logFile };
+  return lines.join('\n');
 }
 
-async function organizeUndo(b) {
-  if (!b.logFile || !String(b.logFile).startsWith(ORGANIZE_LOG_DIR)) return { ok: false, error: '非法日志路径' };
-  let log;
-  try { log = JSON.parse(await fsp.readFile(b.logFile, 'utf8')); } catch { return { ok: false, error: '回滚日志读不到' }; }
-  let undone = 0; const failed = [];
-  for (const m of (log.moves || []).reverse()) {
-    try {
-      if (fs.existsSync(m.from)) { failed.push({ from: m.to, error: '原位置已有同名文件，跳过' }); continue; }
-      await fsp.mkdir(path.dirname(m.from), { recursive: true });
-      await fsp.rename(m.to, m.from);
-      undone++;
-    } catch (e) { failed.push({ from: m.to, error: e.message }); }
+// 备料并返回终端启动命令：brief 写盘（偏好 + 历史 + 工作约定），前端用 term.runInDir 拉起交互式 agent
+async function organizeLaunch(b) {
+  const dir = resolvePath(b.path);
+  const cfg = await readConfig();
+  let engine = cfg.organizeEngine === 'codex' ? 'codex' : 'claude';
+  if (!(await findAgentBin(engine))) {
+    const alt = engine === 'claude' ? 'codex' : 'claude';
+    if (await findAgentBin(alt)) engine = alt;
+    else return { ok: false, error: '没找到 claude / codex 命令——AI 整理需要装其中一个 CLI' };
   }
-  if (!failed.length) await fsp.unlink(b.logFile).catch(() => {});
-  return { ok: true, undone, failed };
+  const prefs = await fsp.readFile(ORGANIZE_PREFS_FILE, 'utf8').catch(() => '');
+  const history = await organizeHistory();
+  const brief = `# AI 整理任务（翻箱 FanBox 生成，每次启动覆盖本文件）
+
+你在翻箱的内嵌终端里，帮用户对话式整理这个文件夹：${dir}
+
+## 工作流程
+1. 先看现状：列出当前文件夹的松散文件（名字/类型/大小/修改时间）。文件夹和隐藏文件一律不动
+2. 结合下面的整理偏好与历史，提出分组整理方案摊给用户——用户明确同意前，一个文件都不要动
+3. 用户可能口头调整方案（「截图不动」「这几个归到XX」），以对话为准
+4. 动手用 mv 移动，目标目录不存在先 mkdir -p
+5. 每完成一批移动，按下面的格式写一份回滚日志，并告诉用户「想撤销随时说」
+6. 收尾：把这次对话里新学到的用户偏好（规则/例外/纠正）一条一行追加进偏好文件，别重复已有条目
+
+## 回滚日志（撤销能力全靠它，格式不能错）
+每批移动写一个新文件 ${ORGANIZE_LOG_DIR}/<毫秒时间戳>.json，内容：
+{"dir":"${dir}","at":<毫秒时间戳>,"moves":[{"from":"<移动前绝对路径>","to":"<移动后绝对路径>"}]}
+用户要撤销时：读对应日志，逐条把 to 移回 from（from 位置已被占用的跳过并说明）
+
+## 整理偏好（用户的长期规则，优先级最高）
+${DEFAULT_ORGANIZE_STRATEGY}
+${prefs.trim() ? `\n### 历次整理沉淀的偏好\n${prefs.trim()}\n` : ''}
+## 偏好文件
+${ORGANIZE_PREFS_FILE}（markdown 列表，新偏好追加在末尾）
+
+## 最近整理历史
+${history || '（还没有历史记录）'}
+`;
+  await fsp.mkdir(ORGANIZE_LOG_DIR, { recursive: true });
+  await fsp.writeFile(ORGANIZE_BRIEF_FILE, brief, 'utf8');
+  const kickoff = `先完整读 ${ORGANIZE_BRIEF_FILE}，然后按里面的约定，和我对话式整理当前文件夹`;
+  // claude 跳权限确认（动手前方案已过人）；codex 用 full-auto（工作区内可写、不逐条审批）
+  const cmd = engine === 'codex' ? `codex --full-auto "${kickoff}"` : `claude --dangerously-skip-permissions "${kickoff}"`;
+  return { ok: true, engine, cmd };
 }
 
 // ---------- 发版向导：检查项目状态 → 改版本号/CHANGELOG → 命令序列交给内嵌终端跑（每步可见可拦）----------
@@ -1925,17 +1874,8 @@ const server = http.createServer(async (req, res) => {
       await updateConfig((c) => { c.lang = lang; });
       return sendJSON(res, 200, { ok: true, lang });
     }
-    if (p === '/api/organize/config') {
-      return sendJSON(res, 200, await organizeConfig());
-    }
-    if (p === '/api/organize/scan' && req.method === 'POST') {
-      return sendJSON(res, 200, await organizeScan(await readBody(req)));
-    }
-    if (p === '/api/organize/apply' && req.method === 'POST') {
-      return sendJSON(res, 200, await organizeApply(await readBody(req)));
-    }
-    if (p === '/api/organize/undo' && req.method === 'POST') {
-      return sendJSON(res, 200, await organizeUndo(await readBody(req)));
+    if (p === '/api/organize/launch' && req.method === 'POST') {
+      return sendJSON(res, 200, await organizeLaunch(await readBody(req)));
     }
     if (p === '/api/release/inspect') {
       return sendJSON(res, 200, await releaseInspect(url.searchParams.get('path')));

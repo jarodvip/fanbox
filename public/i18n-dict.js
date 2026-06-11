@@ -197,20 +197,12 @@ window.FANBOX_DICT = {
   '▶ 续上': '▶ Resume',
   '已在终端续上会话': 'Session resumed in terminal',
 
-  // ---------- AI 整理面板 ----------
-  '读取配置…': 'Loading config…',
+  // ---------- AI 整理（终端交互式）----------
   '没找到 claude / codex 命令——AI 整理需要装其中一个 CLI': 'claude / codex command not found — AI organize needs one of these CLIs installed',
-  '整理策略（可改，会记住你的版本）': 'Organizing strategy (editable — your version is remembered)',
-  '恢复默认策略': 'Restore default strategy',
-  'AI 只看文件名/类型/大小/时间出建议，不读内容；动手前每一条都过你，执行后可整体撤销': 'AI suggests from filename/type/size/date only and never reads contents; every move needs your approval, and the whole batch can be undone',
-  '开始分析': 'Analyze',
-  'Claude 正在看这个文件夹…（一两分钟，别关）': 'Claude is looking at this folder… (a minute or two — keep this open)',
-  'Codex 正在看这个文件夹…（一两分钟，别关）': 'Codex is looking at this folder… (a minute or two — keep this open)',
+  'AI 整理启动失败': 'Failed to launch AI organize',
   '返回': 'Back',
-  'AI 觉得这里不需要整理 🎉': 'AI thinks this folder is already tidy 🎉',
-  '执行失败': 'Failed to apply',
-  '全部撤销': 'Undo all',
-  '撤销失败': 'Undo failed',
+  'Claude 已开聊——先摊方案，你点头它才动手': 'Claude is ready — it lays out a plan first and only moves files after you approve',
+  'Codex 已开聊——先摊方案，你点头它才动手': 'Codex is ready — it lays out a plan first and only moves files after you approve',
 
   // ---------- 发版面板 ----------
   '检查项目状态…': 'Checking project status…',
@@ -419,7 +411,6 @@ window.FANBOX_DICT_RULES = [
   [/^改动 · (.+)$/, (m) => `Changes · ${m[1]}`],
   [/^编辑 · (.+)$/, (m) => `Edit · ${m[1]}`],
   [/^项目记忆 · (.+)$/, (m) => `Project memory · ${m[1]}`],
-  [/^AI 整理 · (.+)$/, (m) => `AI Organize · ${m[1]}`],
   [/^磁盘占用 · (.+)$/, (m) => `Disk usage · ${m[1]}`],
   // 预览底部：创建/修改时间
   [/^创建 (.+)$/, (m) => `Created ${m[1]}`],
@@ -436,11 +427,6 @@ window.FANBOX_DICT_RULES = [
     const t = m[3] === '刚刚' ? 'just now' : m[3].replace(/^(\d+) 分$/, '$1m ago').replace(/^(\d+) 时$/, '$1h ago').replace(/^(\d+) 天$/, '$1d ago');
     return `${m[1]}\n${m[2]} · active ${t}`;
   }],
-  // AI 整理
-  [/^(\d+) 个文件 · (\S+) 提了 (\d+) 条建议(?: · (\d+) 条拿不准（默认不动）)?$/, (m) => `${m[1]} files · ${m[2]} made ${m[3]} suggestions${m[4] ? ` · ${m[4]} uncertain (left alone by default)` : ''}`],
-  [/^执行 (\d+) 项$/, (m) => `Apply ${m[1]}`],
-  [/^已移动 (\d+) 项(?:，(\d+) 项失败)?$/, (m) => `Moved ${m[1]}${m[2] ? `, ${m[2]} failed` : ''}`],
-  [/^已撤销 (\d+) 项$/, (m) => `Undid ${m[1]}`],
   // 发版
   [/^当前 v(.+) →$/, (m) => `now v${m[1]} →`],
   [/^v(.+) 发版序列已在终端开跑$/, (m) => `v${m[1]} release pipeline running in terminal`],

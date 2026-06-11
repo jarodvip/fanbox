@@ -1388,70 +1388,13 @@ async function memoryPanel(dirPath) {
   });
 }
 
-// AI 整理：AI 提案（只看元数据）→ 勾选审批 → 翻箱执行 + 可整体撤销。引擎可选 claude/codex，策略提示词可改
-async function organizePanel(dirPath) {
-  const old = $('.org-overlay'); if (old) old.remove();
-  const ov = document.createElement('div');
-  ov.className = 'input-overlay org-overlay';
-  ov.innerHTML = `<div class="input-dialog org-dialog"><div class="input-title">AI 整理 · ${escapeHtml(dirPath.replace(state.home, '~'))}</div><div class="org-body"><div class="cmdk-loading">读取配置…</div></div></div>`;
-  document.body.appendChild(ov);
-  const onKey = (ev) => { if (ev.key === 'Escape') { ev.preventDefault(); close(); } };
-  const close = () => { ov.remove(); document.removeEventListener('keydown', onKey, true); };
-  ov.onclick = (ev) => { if (ev.target === ov) close(); };
-  document.addEventListener('keydown', onKey, true);
-  const body = ov.querySelector('.org-body');
-  const cfg = await api('/api/organize/config');
-  if (!cfg.engines.claude && !cfg.engines.codex) { body.innerHTML = '<div class="empty-state">没找到 claude / codex 命令——AI 整理需要装其中一个 CLI</div>'; return; }
-  body.innerHTML = `
-    <div class="org-engines">${['claude', 'codex'].filter((e) => cfg.engines[e]).map((e) =>
-      `<label><input type="radio" name="org-engine" value="${e}"${e === cfg.engine ? ' checked' : ''}> ${e === 'claude' ? 'Claude Code' : 'Codex'}</label>`).join('')}</div>
-    <details class="org-strategy"><summary>整理策略（可改，会记住你的版本）</summary>
-      <textarea id="org-strategy" rows="9" spellcheck="false">${escapeHtml(cfg.strategy)}</textarea>
-      <a id="org-reset" class="org-reset">恢复默认策略</a></details>
-    <div class="org-hint">AI 只看文件名/类型/大小/时间出建议，不读内容；动手前每一条都过你，执行后可整体撤销</div>
-    <div class="input-actions"><button class="ghost-btn" id="org-cancel">取消</button><button class="primary" id="org-go">开始分析</button></div>`;
-  $('#org-cancel').onclick = close;
-  $('#org-reset').onclick = () => { $('#org-strategy').value = cfg.defaultStrategy; };
-  $('#org-go').onclick = async () => {
-    const engine = ov.querySelector('[name=org-engine]:checked').value;
-    const strategy = $('#org-strategy').value;
-    body.innerHTML = `<div class="cmdk-loading">${engine === 'claude' ? 'Claude' : 'Codex'} 正在看这个文件夹…（一两分钟，别关）</div>`;
-    const d = await apiPost('/api/organize/scan', { path: dirPath, engine, strategy });
-    if (!d.ok) { body.innerHTML = `<div class="empty-state">${escapeHtml(d.error)}</div><div class="input-actions"><button class="ghost-btn" id="org-back">返回</button></div>`; $('#org-back').onclick = () => organizePanel(dirPath); return; }
-    if (!d.moves.length && !d.uncertain.length) { body.innerHTML = '<div class="empty-state">AI 觉得这里不需要整理 🎉</div>'; return; }
-    const row = (m, i, checked, hint) => `<label class="org-row${hint ? ' org-unc' : ''}"><input type="checkbox" data-i="${i}"${checked ? ' checked' : ''}${hint ? ' data-unc="1"' : ''}>
-      <span class="org-move"><b>${escapeHtml(m.from)}</b>${m.to ? ` → ${escapeHtml(m.to)}` : ''}<i>${escapeHtml(m.reason || m.hint || '')}</i></span></label>`;
-    body.innerHTML = `
-      <div class="org-hint">${d.scanned} 个文件 · ${engine} 提了 ${d.moves.length} 条建议${d.uncertain.length ? ` · ${d.uncertain.length} 条拿不准（默认不动）` : ''}</div>
-      <div class="org-list">${d.moves.map((m, i) => row(m, i, true)).join('')}${d.uncertain.map((u, i) => row(u, i, false, true)).join('')}</div>
-      <div class="input-actions"><button class="ghost-btn" id="org-cancel2">取消</button><button class="primary" id="org-apply"></button></div>`;
-    const applyBtn = $('#org-apply');
-    const updateCount = () => { const n = body.querySelectorAll('.org-row input:checked:not([data-unc])').length; applyBtn.textContent = `执行 ${n} 项`; applyBtn.disabled = !n; };
-    body.querySelectorAll('.org-row input:not([data-unc])').forEach((c) => { c.onchange = updateCount; });
-    body.querySelectorAll('.org-row input[data-unc]').forEach((c) => { c.disabled = true; }); // 拿不准的看一眼就好，v1 不提供执行
-    updateCount();
-    $('#org-cancel2').onclick = close;
-    applyBtn.onclick = async () => {
-      applyBtn.disabled = true;
-      const moves = [...body.querySelectorAll('.org-row input:checked:not([data-unc])')].map((c) => d.moves[Number(c.dataset.i)]).map((m) => ({ from: m.from, to: m.to }));
-      const r = await apiPost('/api/organize/apply', { path: dirPath, moves });
-      if (!r.ok) { toast(r.error || '执行失败', true); applyBtn.disabled = false; return; }
-      navigate(state.cwd);
-      body.innerHTML = `
-        <div class="org-hint">已移动 ${r.moved} 项${r.failed.length ? `，${r.failed.length} 项失败` : ''}</div>
-        ${r.failed.length ? `<div class="org-list">${r.failed.map((f) => `<div class="org-row org-unc"><span class="org-move"><b>${escapeHtml(f.from || '')}</b><i>${escapeHtml(f.error || '')}</i></span></div>`).join('')}</div>` : ''}
-        <div class="input-actions">${r.logFile ? `<button class="ghost-btn" id="org-undo">全部撤销</button>` : ''}<button class="primary" id="org-done">完成</button></div>`;
-      $('#org-done').onclick = close;
-      const ub = $('#org-undo');
-      if (ub) ub.onclick = async () => {
-        ub.disabled = true;
-        const u = await apiPost('/api/organize/undo', { logFile: r.logFile });
-        toast(u.ok ? `已撤销 ${u.undone} 项` : (u.error || '撤销失败'), !u.ok);
-        navigate(state.cwd);
-        close();
-      };
-    };
-  };
+// AI 整理：一键在内嵌终端拉起交互式 agent（claude/codex）对话式整理。
+// 翻箱只备料——把整理偏好、过往整理历史、工作约定写成 brief 文件，agent 读完先摊方案，
+// 你在终端里对话确认/调整后它才动手；每批移动写回滚日志，想撤销在对话里说一声就行
+async function organizeLaunch(dirPath) {
+  const r = await apiPost('/api/organize/launch', { path: dirPath });
+  if (!r.ok) { toast(r.error || 'AI 整理启动失败', true); return; }
+  term.runInDir(dirPath, r.cmd, `${r.engine === 'codex' ? 'Codex' : 'Claude'} 已开聊——先摊方案，你点头它才动手`);
 }
 
 // 发版向导：版本号 + 发布说明（预填 CHANGELOG 的 Unreleased 段）→ 命令序列在内嵌终端跑，每步可见可拦
@@ -1539,7 +1482,7 @@ function showContextMenu(ev, e) {
   const items = [];
   if (e.isDir) items.push({ label: '打开', fn: () => navigate(e.path) });
   else items.push({ label: '预览', fn: () => { state.selected = e.path; openPreview(e); renderFiles(); } });
-  if (e.isDir) items.push({ label: 'AI 整理…', fn: () => organizePanel(e.path) });
+  if (e.isDir) items.push({ label: 'AI 整理…', fn: () => organizeLaunch(e.path) });
   if (e.isDir) items.push({ label: '磁盘占用透视', fn: () => diskPanel(e.path) });
   if (e.isDir) items.push({ label: '在终端打开', fn: () => term.openInDir(e.path) });
   else items.push({ label: '在所在目录开终端', fn: () => term.openInDir(dirOf(e.path)) });
@@ -1984,7 +1927,7 @@ function bindEvents() {
       { label: '新建文件夹…', fn: () => doCreate('dir') },
       { label: '新建文件…', fn: () => doCreate('file') },
       { sep: true },
-      { label: 'AI 整理…', fn: () => organizePanel(state.cwd) },
+      { label: 'AI 整理…', fn: () => organizeLaunch(state.cwd) },
       { label: '磁盘占用透视', fn: () => diskPanel(state.cwd) },
     ]);
   };
