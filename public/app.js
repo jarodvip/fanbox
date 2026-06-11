@@ -263,9 +263,7 @@ async function navigate(p, pushHistory = true) {
     state.breadcrumb = data.breadcrumb;
     state.parent = data.parent;
     state.recentMode = false;
-    state.filter = '';
     state.cursor = -1;
-    $('#quick-filter').value = '';
     render();
     renderRootsActive();
     // 联动：监听此目录 + 各终端项目目录的文件变化（agent 改文件→自动刷新）；终端跟随则 cd 过去
@@ -332,7 +330,6 @@ function renderBreadcrumb() {
 function visibleEntries() {
   let list = state.entries.slice();
   if (!state.showHidden) list = list.filter((e) => !e.hidden);
-  if (state.filter) { const f = state.filter.toLowerCase(); list = list.filter((e) => e.name.toLowerCase().includes(f)); }
   const dirFirst = (a, b) => (a.isDir !== b.isDir ? (a.isDir ? -1 : 1) : 0);
   // 最近修改视图：以时间为本义，默认按 mtime 倒序（用户可显式切到大小/名称）
   if (state.recentMode && state.sort === 'name') list.sort((a, b) => b.mtime - a.mtime);
@@ -345,10 +342,8 @@ function renderFiles() {
   const area = $('#file-area');
   const list = visibleEntries();
   state.visible = list;
-  const dirs = list.filter((e) => e.isDir).length;
-  $('#dir-meta').textContent = `${dirs} 个文件夹 · ${list.length - dirs} 个文件`;
   if (!list.length) {
-    const emptyMsg = state.recentMode ? (state.filter ? '没有匹配的文件' : '没找到最近修改的文件') : (state.filter ? '没有匹配的文件' : '这个文件夹是空的');
+    const emptyMsg = state.recentMode ? '没找到最近修改的文件' : '这个文件夹是空的';
     const emptyIc = state.recentMode ? 'clock' : 'inbox';
     area.innerHTML = `<div class="empty-state"><div class="big">${ic(emptyIc, 'currentColor', 48)}</div>${emptyMsg}</div>`;
     return;
@@ -1290,6 +1285,11 @@ function showContextMenu(ev, e) {
   items.push({ label: isFav(e.path) ? '取消收藏' : '收藏', fn: () => toggleFav(e) });
   items.push({ label: '重命名…', fn: () => doRename(e) });
   items.push({ label: '移到废纸篓', danger: true, fn: () => doTrash(e) });
+  popupMenu(ev, items);
+}
+// 在鼠标位置弹一个菜单（右键菜单与空白处双击菜单共用）
+function popupMenu(ev, items) {
+  closeContextMenu();
   const menu = document.createElement('div');
   menu.id = 'context-menu';
   menu.className = 'context-menu';
@@ -1368,9 +1368,7 @@ function renderRecentOpened() {
 // 都能直接作用在最近列表上，不会把视图无声切回上一个目录
 async function showRecent() {
   state.recentMode = true;
-  state.filter = '';
   state.cursor = -1;
-  $('#quick-filter').value = '';
   $('#file-area').innerHTML = '<div class="cmdk-loading">扫描最近修改的文件…</div>';
   renderBreadcrumb();
   const data = await api('/api/recent?root=' + encodeURIComponent(state.cwd || state.home));
@@ -1592,8 +1590,9 @@ function bindEvents() {
   $('#btn-recent').onclick = showRecent;
   $('#btn-changes').onclick = () => toggleChangesPanel();
   $('#btn-terminal').onclick = () => term.toggle();
-  $('#term-claude').onclick = () => term.launchAgent('claude --dangerously-skip-permissions', true);
+  $('#term-claude').onclick = () => term.launchAgent('claude --dangerously-skip-permissions');
   $('#term-codex').onclick = () => term.launchAgent('codex');
+  usagePanel.bind();
   $('#term-newtab').onclick = () => term.newTab();
   $('#term-max').onclick = () => term.toggleMax();
   $('#term-dock').onclick = () => term.setDock(term.dock === 'bottom' ? 'right' : 'bottom');
@@ -1639,15 +1638,20 @@ function bindEvents() {
   // 全局兜底：文件拖到窗口其它区域松手时，阻止 Electron 导航到 file:// 顶掉整个界面
   window.addEventListener('dragover', (e) => e.preventDefault());
   window.addEventListener('drop', (e) => e.preventDefault());
-  $('#btn-new-dir').onclick = () => doCreate('dir');
-  $('#btn-new-file').onclick = () => doCreate('file');
+  // 文件区空白处双击 → 新建菜单（原顶部筛选行已移除，新建入口收进这里）
+  $('#file-area').addEventListener('dblclick', (e) => {
+    if (e.target.closest('.item')) return; // 条目自身的双击是「打开」，不抢
+    popupMenu(e, [
+      { label: '新建文件夹…', fn: () => doCreate('dir') },
+      { label: '新建文件…', fn: () => doCreate('file') },
+    ]);
+  });
   document.addEventListener('click', (e) => { if (!e.target.closest('#context-menu')) closeContextMenu(); });
   window.addEventListener('blur', closeContextMenu);
   $('#scope-toggle').onclick = () => cmdk.toggleScope();
 
   $('#toggle-hidden').checked = state.showHidden;
   $('#toggle-hidden').onchange = (e) => { state.showHidden = e.target.checked; localStorage.setItem('fb_hidden', state.showHidden ? '1' : '0'); renderFiles(); };
-  $('#quick-filter').oninput = (e) => { state.filter = e.target.value; state.cursor = -1; renderFiles(); };
 
   $('#sort-seg').querySelectorAll('button').forEach((b) => {
     b.classList.toggle('active', b.dataset.sort === state.sort);
@@ -1682,15 +1686,9 @@ function bindEvents() {
     if (lbOpen) { if (e.key === 'Escape') document.querySelector('.lightbox').remove(); return; }
     if (imgEditState && (e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); ieUndo(imgEditState); return; }
     const inInput = ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName) || document.activeElement.isContentEditable;
-    // 输入框里按 Esc 先退出输入（筛选框还会清空内容），别越级把预览关掉
-    if (e.key === 'Escape' && inInput) {
-      const el = document.activeElement;
-      if (el.id === 'quick-filter' && el.value) { el.value = ''; state.filter = ''; state.cursor = -1; renderFiles(); }
-      el.blur();
-      return;
-    }
+    // 输入框里按 Esc 先退出输入，别越级把预览关掉
+    if (e.key === 'Escape' && inInput) { document.activeElement.blur(); return; }
     if (e.key === 'Escape' && !$('#preview').classList.contains('hidden')) { closePreview(); return; }
-    if (e.key === '/' && !inInput) { e.preventDefault(); $('#quick-filter').focus(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key === '[') { e.preventDefault(); goBack(); return; }
     if ((e.metaKey || e.ctrlKey) && (e.key === 'b' || e.key === 'B') && !inInput) { e.preventDefault(); toggleSidebar(); return; }
     if (inInput) return;
@@ -1826,14 +1824,28 @@ const term = {
     const write = () => { if (this.active) this.input(this.active, shQuote(p) + ' '); const s = this.sessions.find((x) => x.id === this.active); if (s) s.xterm.focus(); };
     if (wasHidden) setTimeout(write, 280); else write();
   },
-  // 一键在终端启动 coding agent；newTab=true 总是新开标签跑，不打扰当前会话
-  async launchAgent(cmd, newTab) {
+  // 一键在终端启动 coding agent：当前标签是空闲 shell 就地启动；正跑着东西（claude/codex/任何前台程序）
+  // 则新开标签，不打断也不把命令打进别的程序里
+  async launchAgent(cmd) {
     if (!this.available()) { openWith(state.cwd, 'terminal'); return; } // 网页版降级到系统终端
-    let sess;
-    if (newTab || !this.sessions.length) sess = await this.openInDir(state.cwd); // 等 spawn 完，拿确切 session 写入
-    else { if ($('#terminal-panel').classList.contains('hidden')) this.open(); sess = this.sessions.find((x) => x.id === this.active); }
+    let sess = null;
+    if (this.sessions.length) {
+      if ($('#terminal-panel').classList.contains('hidden')) this.open();
+      const cur = this.sessions.find((x) => x.id === this.active);
+      if (cur && !cur.dead && await this.isPlainShell(cur)) sess = cur;
+    }
+    if (!sess) sess = await this.openInDir(state.cwd); // 等 spawn 完，拿确切 session 写入
     if (sess && !sess.dead) { this.input(sess.id, cmd + '\r'); sess.xterm.focus(); toast('已在终端启动 ' + cmd); }
     else toast('终端启动失败', true);
+  },
+  // 该会话前台是不是裸 shell？判断不了一律按「不是」处理——宁可新开标签，也不往运行中的程序里打字
+  async isPlainShell(s) {
+    try {
+      const r = await window.fanboxPty.proc(s.id);
+      if (!r || !r.ok || !r.proc) return false;
+      const name = String(r.proc).split('/').pop().replace(/^-/, '').toLowerCase();
+      return ['zsh', 'bash', 'fish', 'sh', 'dash', 'tcsh', 'nu', 'pwsh', 'powershell.exe', 'cmd.exe'].includes(name);
+    } catch { return false; }
   },
   // 把预览里选中的文字作为「上下文」喂给终端 agent：带文件出处 + 围栏，bracketed paste 防逐行误提交
   sendContext(text, srcPath) {
@@ -2219,6 +2231,83 @@ const term = {
     });
   },
   retheme() { const th = this.theme(); this.sessions.forEach((s) => { s.xterm.options.theme = th; }); },
+};
+
+// ---------- Agent 用量面板（侧栏常驻，可开合）----------
+// Claude Code 是本地 token 统计（无官方百分比可拿），Codex 是官方配额快照（来自其会话日志）
+const usagePanel = {
+  timer: null,
+  fmtTok(n) {
+    if (n >= 1e9) return (n / 1e9).toFixed(n < 1e10 ? 1 : 0) + 'B';
+    if (n >= 1e6) return (n / 1e6).toFixed(n < 1e7 ? 1 : 0) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(0) + 'k';
+    return String(n);
+  },
+  fmtReset(sec) {
+    if (!sec) return '';
+    const d = new Date(sec * 1000);
+    const sameDay = d.toDateString() === new Date().toDateString();
+    const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    return (sameDay ? '' : '周' + '日一二三四五六'[d.getDay()] + ' ') + hm + ' 重置';
+  },
+  ago(ms) {
+    const m = Math.round((Date.now() - ms) / 60000);
+    if (m < 2) return '刚刚';
+    if (m < 60) return m + ' 分钟前';
+    if (m < 1440) return Math.round(m / 60) + ' 小时前';
+    return Math.round(m / 1440) + ' 天前';
+  },
+  bar(label, pct, extra) {
+    const v = Math.max(0, Math.min(100, Math.round(pct)));
+    const danger = v >= 85 ? ' danger' : '';
+    return `<div class="usage-row"><span class="usage-label">${label}</span>
+      <span class="usage-bar"><i class="${danger.trim()}" style="width:${v}%"></i></span>
+      <span class="usage-num${danger}">${v}%</span></div>
+      ${extra ? `<div class="usage-sub">${extra}</div>` : ''}`;
+  },
+  render(d) {
+    const box = $('#usage-body');
+    if (!d || !d.ok) { box.innerHTML = '<div class="usage-sub">读取失败</div>'; return; }
+    let h = '';
+    if (d.codex) {
+      const c = d.codex;
+      h += `<div class="usage-agent">Codex${c.planType ? ` <i class="usage-plan">${escapeHtml(c.planType)}</i>` : ''}</div>`;
+      if (c.primary) h += this.bar('5h 窗口', c.primary.usedPercent, '');
+      if (c.secondary) h += this.bar('周配额', c.secondary.usedPercent, this.fmtReset(c.secondary.resetsAt));
+      h += `<div class="usage-sub">快照：${this.ago(c.capturedAt)}的 Codex 会话</div>`;
+    }
+    if (d.claude) {
+      const c = d.claude;
+      h += `<div class="usage-agent">Claude Code</div>
+        <div class="usage-trio">
+          <span><b>${this.fmtTok(c.last5h.total)}</b>近5h</span>
+          <span><b>${this.fmtTok(c.today.total)}</b>今日</span>
+          <span><b>${this.fmtTok(c.week.total)}</b>本周</span>
+        </div>
+        <div class="usage-sub">token 总量 · 本地会话日志统计</div>`;
+    }
+    if (!d.codex && !d.claude) h = '<div class="usage-sub">没找到 Claude Code / Codex 的本机会话记录</div>';
+    box.innerHTML = h;
+  },
+  async refresh() {
+    try { this.render(await api('/api/agent-usage')); }
+    catch { this.render(null); }
+  },
+  open() { return localStorage.getItem('fb_usage_open') === '1'; },
+  apply() {
+    const on = this.open();
+    $('#usage-body').classList.toggle('hidden', !on);
+    $('#usage-arrow').textContent = on ? '▾' : '▸';
+    clearInterval(this.timer); this.timer = null;
+    if (on) { this.refresh(); this.timer = setInterval(() => this.refresh(), 60000); }
+  },
+  bind() {
+    $('#usage-toggle').onclick = () => {
+      localStorage.setItem('fb_usage_open', this.open() ? '0' : '1');
+      this.apply();
+    };
+    this.apply();
+  },
 };
 
 // ---------- Monaco 编辑器（本地 vendor，离线可用；加载失败回退 textarea）----------
@@ -2608,7 +2697,7 @@ async function init() {
 // 新版本提示：主进程查到 GitHub 有新 Release 时右下角弹胶囊，引导去下载页（不强更不打扰）
 function bindUpdateNotice() {
   if (!window.fanboxUpdate) return;
-  window.fanboxUpdate.onAvailable(({ version, url }) => {
+  const show = ({ version, url }) => {
     if (localStorage.getItem('fb_skip_ver') === version || document.querySelector('.update-pill')) return;
     const bar = document.createElement('div');
     bar.className = 'update-pill';
@@ -2616,6 +2705,9 @@ function bindUpdateNotice() {
     document.body.appendChild(bar);
     bar.querySelector('.up-go').onclick = () => { window.fanboxUpdate.open(url); bar.remove(); };
     bar.querySelector('.up-x').onclick = () => { localStorage.setItem('fb_skip_ver', version); bar.remove(); };
-  });
+  };
+  window.fanboxUpdate.onAvailable(show);
+  // 主进程启动 6 秒就推送，init 加载大目录时这里可能还没注册监听——补拉一次，错过的推送不丢
+  if (window.fanboxUpdate.get) window.fanboxUpdate.get().then((m) => { if (m) show(m); }).catch(() => {});
 }
 init();

@@ -94,27 +94,81 @@ function cmpVer(a, b) {
   for (let i = 0; i < 3; i++) { const d = (pa[i] || 0) - (pb[i] || 0); if (d) return d; }
   return 0;
 }
-async function checkUpdate() {
+const REL_PAGE = 'https://github.com/alchaincyf/fanbox/releases/latest';
+async function fetchLatestRelease() {
+  // 先走 API（信息全）；代理共享出口 IP 很容易吃 GitHub API 的未认证限流（60 次/小时/IP，403），
+  // 失败就退回抓 releases/latest 网页重定向——重定向后的 URL 自带 tag，且不占 API 配额
   try {
     const res = await net.fetch('https://api.github.com/repos/alchaincyf/fanbox/releases/latest', {
       headers: { 'User-Agent': 'fanbox-app', Accept: 'application/vnd.github+json' },
     });
-    if (!res.ok) return;
-    const rel = await res.json();
-    const latest = rel.tag_name || '';
-    if (latest && cmpVer(latest, app.getVersion()) > 0 && win && !win.isDestroyed()) {
-      win.webContents.send('update:available', { version: latest.replace(/^v/, ''), url: rel.html_url });
+    if (res.ok) {
+      const rel = await res.json();
+      if (rel.tag_name) return { tag: rel.tag_name, url: rel.html_url || REL_PAGE };
     }
-  } catch { /* 离线/被墙：静默，下次再查 */ }
+  } catch { /* 走兜底 */ }
+  const res = await net.fetch(REL_PAGE, { headers: { 'User-Agent': 'fanbox-app' } });
+  const m = String(res.url || '').match(/\/releases\/tag\/([^/?#]+)/);
+  if (m) return { tag: decodeURIComponent(m[1]), url: res.url };
+  return null;
+}
+let pendingUpdate = null; // 渲染层晚注册监听也能拉到（启动 6 秒的推送 vs init 加载大目录，谁先谁后说不准）
+let updRetry = 0;
+async function checkUpdate(opts) {
+  const manual = !!(opts && opts.manual);
+  let info = null;
+  try { info = await fetchLatestRelease(); } catch { info = null; }
+  if (!info) {
+    if (manual) {
+      dialog.showMessageBoxSync(win && !win.isDestroyed() ? win : undefined, {
+        type: 'warning', buttons: ['好'], message: '检查更新失败',
+        detail: '没连上 GitHub（网络问题或接口限流），稍后再试。',
+      });
+    } else if (updRetry < 3) { updRetry++; setTimeout(checkUpdate, 10 * 60 * 1000); } // 失败别干等 12 小时
+    return;
+  }
+  updRetry = 0;
+  const newer = cmpVer(info.tag, app.getVersion()) > 0;
+  if (newer) {
+    pendingUpdate = { version: info.tag.replace(/^v/, ''), url: info.url };
+    if (win && !win.isDestroyed()) win.webContents.send('update:available', pendingUpdate);
+  }
+  if (manual) {
+    const owner = win && !win.isDestroyed() ? win : undefined;
+    if (newer) {
+      const c = dialog.showMessageBoxSync(owner, {
+        type: 'info', buttons: ['去下载', '取消'], defaultId: 0, cancelId: 1,
+        message: `发现新版本 v${pendingUpdate.version}`,
+        detail: `当前版本 v${app.getVersion()}。点「去下载」打开发布页，下载后替换 /Applications 里的旧版即可。`,
+      });
+      if (c === 0) shell.openExternal(pendingUpdate.url);
+    } else {
+      dialog.showMessageBoxSync(owner, {
+        type: 'info', buttons: ['好'], message: '已是最新版本',
+        detail: `当前版本 v${app.getVersion()} 就是最新发布版。`,
+      });
+    }
+  }
 }
 ipcMain.handle('update:open', (e, { url }) => { if (/^https:\/\/github\.com\//.test(String(url))) shell.openExternal(url); });
+ipcMain.handle('update:get', () => pendingUpdate);
 
 // 原生菜单——关键是 Edit role，终端里的 ⌘C/⌘V 才生效
 function buildMenu() {
   const isMac = process.platform === 'darwin';
   const template = [
-    ...(isMac ? [{ role: 'appMenu', label: '翻箱 FanBox' }] : []),
-    { label: '文件', submenu: [isMac ? { role: 'close' } : { role: 'quit' }] },
+    ...(isMac ? [{ label: '翻箱 FanBox', submenu: [
+      { role: 'about', label: '关于 翻箱 FanBox' },
+      { label: '检查更新…', click: () => checkUpdate({ manual: true }) },
+      { type: 'separator' },
+      { role: 'hide', label: '隐藏 翻箱 FanBox' }, { role: 'hideOthers', label: '隐藏其他' }, { role: 'unhide', label: '全部显示' },
+      { type: 'separator' },
+      { role: 'quit', label: '退出 翻箱 FanBox' },
+    ] }] : []),
+    { label: '文件', submenu: [
+      ...(isMac ? [] : [{ label: '检查更新…', click: () => checkUpdate({ manual: true }) }, { type: 'separator' }]),
+      isMac ? { role: 'close' } : { role: 'quit' },
+    ] },
     { label: '编辑', submenu: [
       { role: 'undo', label: '撤销' }, { role: 'redo', label: '重做' }, { type: 'separator' },
       { role: 'cut', label: '剪切' }, { role: 'copy', label: '复制' }, { role: 'paste', label: '粘贴' },
@@ -205,17 +259,38 @@ ipcMain.on('pty:input', (e, { id, data }) => { const p = terminals.get(id); if (
 ipcMain.on('pty:resize', (e, { id, cols, rows }) => { const p = terminals.get(id); if (p) { try { p.resize(cols, rows); } catch { /* */ } } });
 ipcMain.on('pty:kill', (e, { id }) => { const p = terminals.get(id); if (p) { try { p.kill(); } catch { /* */ } terminals.delete(id); } });
 
+// lsof 在非 UTF-8 locale 下会把中文路径按字节转义成 \xe8 字面量（GUI 启动的 app 不继承 shell 的 locale，
+// 正中这个坑：标签标题乱码、双击定位失效）。调 lsof 时显式给 UTF-8 locale，这里再留一层 \xNN 解码兜底
+function decodeLsofPath(s) {
+  if (!/\\x[0-9a-fA-F]{2}/.test(s)) return s;
+  const bytes = [];
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '\\' && s[i + 1] === 'x' && /^[0-9a-fA-F]{2}$/.test(s.slice(i + 2, i + 4))) {
+      bytes.push(parseInt(s.slice(i + 2, i + 4), 16));
+      i += 3;
+    } else {
+      for (const b of Buffer.from(s[i], 'utf8')) bytes.push(b);
+    }
+  }
+  return Buffer.from(bytes).toString('utf8');
+}
 // 取某终端 shell 的真实当前目录（用 lsof 查 pty 子进程的 cwd），实现「定位到终端目录」
 ipcMain.handle('pty:cwd', (e, { id }) => new Promise((resolve) => {
   const p = terminals.get(id);
   if (!p || !p.pid) return resolve({ ok: false });
   const { exec } = require('child_process');
-  exec(`lsof -a -p ${p.pid} -d cwd -Fn`, (err, stdout) => {
+  exec(`lsof -a -p ${p.pid} -d cwd -Fn`, { env: { ...process.env, LC_ALL: 'en_US.UTF-8' } }, (err, stdout) => {
     if (err) return resolve({ ok: false });
     const line = stdout.split('\n').find((l) => l.startsWith('n'));
-    resolve(line ? { ok: true, cwd: line.slice(1) } : { ok: false });
+    resolve(line ? { ok: true, cwd: decodeLsofPath(line.slice(1)) } : { ok: false });
   });
 }));
+
+// 取终端前台进程名（node-pty 维护）：判断当前是裸 shell 还是正跑着 claude/codex 等程序
+ipcMain.handle('pty:proc', (e, { id }) => {
+  const p = terminals.get(id);
+  return p ? { ok: true, proc: p.process || '' } : { ok: false };
+});
 
 // ---------- 文件监听（agent 改文件 → 自动刷新 + 跨项目变更收件箱）----------
 // 多目录监听：浏览目录 + 每个终端会话所在的项目目录。一下午开多个项目跑 agent 时，
