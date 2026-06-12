@@ -261,8 +261,9 @@ window.FANBOX_DICT = {
   // ---------- 终端 ----------
   '启动 Claude Code（跳过权限确认）：空闲终端就地启动，正跑着任务则新开标签': 'Launch Claude Code (skipping permission prompts): starts in the idle terminal, or opens a new tab if one is busy',
   '启动 Codex：空闲终端就地启动，正跑着任务则新开标签': 'Launch Codex: starts in the idle terminal, or opens a new tab if one is busy',
-  '文件跟随：agent 改哪个文件，文件区和预览就跟到哪；html/md 边写边出实时预览（手动浏览即自动停）': 'Follow files: the file view and preview track whatever the agent edits; html/md render live as they are written (any manual browsing stops it)',
+  '文件跟随：跟着当前终端 tab 的 agent，它改哪个文件，文件区和预览就跟到哪；html/md 边写边出实时预览（手动浏览即自动停）': "Follow files: tracks the current terminal tab's agent — the file view and preview follow whatever it edits; html/md render live as they are written (any manual browsing stops it)",
   '文件跟随': 'Follow files',
+  '绑定的终端已关闭，文件跟随已停': 'The bound terminal was closed — follow stopped',
   '文件跟随已开：agent 改哪个文件就看哪个': 'Follow on: now tracking whatever file the agent edits',
   '文件跟随已停': 'Follow stopped',
   '手动接管，文件跟随已停': 'You took over — follow stopped',

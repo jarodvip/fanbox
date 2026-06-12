@@ -2967,9 +2967,11 @@ const CHANGE_IGNORE = new Set(['.git', 'node_modules', '.next', 'dist', 'build',
 // 这次变更是不是该被忽略的系统/构建噪声（高亮、刷新、收件箱共用一套判断）
 function isNoisyChange(filename) {
   const segs = String(filename).split('/');
-  if (segs.some((s) => CHANGE_IGNORE.has(s))) return true;
+  // 隐藏文件/目录一律算噪声：agent 写 .git、各种 .config 时用户什么都没的看（.DS_Store/.com.apple. 也被这条覆盖）
+  if (segs.some((s) => CHANGE_IGNORE.has(s) || s.startsWith('.'))) return true;
   const name = segs[segs.length - 1];
-  return !name || name === '.DS_Store' || name.endsWith('~') || name.endsWith('.swp') || name.startsWith('.com.apple.');
+  return !name || name.endsWith('~') || name.endsWith('.swp')
+    || /\.(tmp|part|crdownload|lock)$|-(journal|shm|wal)$/i.test(name); // sqlite 等后台 App 的临时 sidecar
 }
 function recordChange(dir, filename) {
   if (isNoisyChange(filename)) return; // 过滤构建/依赖/系统噪声
@@ -3111,6 +3113,7 @@ function kindFromName(p) {
 // md 边写边渲染。任何手动浏览/编辑 = 接管，跟随立即自动停，想跟再点按钮。
 const follow = {
   on: false,
+  sid: null,         // 开启时绑定的终端会话 id——只跟这个 agent 项目目录里的写入
   path: null,        // 正在跟随的文件（绝对路径）
   lastContent: null, // 上次渲染的文本内容，用于定位本次改动行
   pendingPath: null, // 节流窗口内最新的待切换目标
@@ -3123,6 +3126,9 @@ const isHtmlName = (n) => /\.(html?|xhtml)$/i.test(String(n || ''));
 function setFileFollow(on, offMsg) {
   if (follow.on === on) return;
   follow.on = on;
+  // 跟随绑定开启那一刻的活动终端 tab：切到别的 tab，其他 agent 的写入不跟
+  //（term.active 可能是关完所有标签后的残留 id，必须确认会话还活着才绑）
+  follow.sid = (on && typeof term !== 'undefined' && term.sessions.some((x) => x.id === term.active)) ? term.active : null;
   $('#file-follow')?.classList.toggle('on', on);
   clearTimeout(follow.timers.sw); clearTimeout(follow.timers.rd);
   follow.timers = {};
@@ -3130,15 +3136,41 @@ function setFileFollow(on, offMsg) {
   follow.swapping = false; follow.swapDirty = false;
   if (!on) $('#preview-title')?.querySelector('.live-badge')?.remove(); // 留住最后画面，只摘掉「跟随中」
   toast(on ? '文件跟随已开：agent 改哪个文件就看哪个' : (offMsg || '文件跟随已停'));
-  // 一开就有得看：5 分钟内有过变更就直接跟上最后那个文件，不用干等 agent 下一笔
-  if (on && state.changeLog[0] && Date.now() - state.changeLog[0].ts < 300000) followSwitch(state.changeLog[0].path);
+  // 一开就有得看：5 分钟内有过范围内的变更就直接跟上，不用干等 agent 下一笔
+  if (on) {
+    const recent = state.changeLog.find((c) => Date.now() - c.ts < 300000 && inFollowScope(c.path));
+    if (recent) followSwitch(recent.path);
+  }
 }
+// 跟随范围 = 绑定终端「现在」所在的项目目录（cwd 随 agent cd 走）；没绑终端则保持旧口径全跟
+function followScopeRoot() {
+  if (!follow.sid || typeof term === 'undefined') return null;
+  const s = term.sessions.find((x) => x.id === follow.sid);
+  if (!s) return null;
+  return (s.cwd || s.startDir || '').replace(/\/$/, '') || null;
+}
+function inFollowScope(full) {
+  if (!follow.sid) return true;
+  const root = followScopeRoot();
+  if (!root) return false;
+  return full === root || full.startsWith(root + '/');
+}
+// 看头优先级：html/md 这种「写给人看的」> 代码 > 其它（图片/数据等）
+const followPrio = (p) => (isHtmlName(p) || isMdName(p)) ? 2 : (kindFromName(p) === 'text' ? 1 : 0);
 // 变更事件入口（已过噪声/自打开过滤）：同一文件继续写 → 只刷视图；换了文件 → 节流切目标
 function followChange(dir, sub) {
   if (!follow.on) return;
+  // 绑定的终端 tab 被关掉：跟随失去对象，全部动作就地停
+  if (follow.sid && typeof term !== 'undefined' && !term.sessions.some((x) => x.id === follow.sid)) {
+    setFileFollow(false, '绑定的终端已关闭，文件跟随已停');
+    return;
+  }
   const full = dir.replace(/\/$/, '') + '/' + sub;
+  if (!inFollowScope(full)) return; // 别的项目/别的 App 写的文件，不归这次跟随管
   if (full === follow.path) { scheduleFollowRender(); return; }
   if (dirtyCheck || autosaveFlush || imgEditState) return; // 编辑器开着就不抢屏，等用户收工
+  // 已排队的目标更值得看（html/md）时，不被低优先级写入顶掉
+  if (follow.timers.sw && follow.pendingPath && followPrio(follow.pendingPath) > followPrio(full)) return;
   follow.pendingPath = full;
   // 节流而非防抖：agent 在多个文件间快速轮写时，定时器只设一次，到点取最新目标，
   // 防抖会被连续事件无限顺延、永远切不过去
@@ -3294,6 +3326,7 @@ function liveHtml(e, first) {
     swapped = true;
     follow.swapping = false;
     if (!next.isConnected) return;
+    if (!follow.on || follow.path !== e.path) { next.remove(); return; } // 换页途中跟随被停/切走：丢弃，别抢屏
     wrap.querySelectorAll('iframe').forEach((f) => { if (f !== next) f.remove(); });
     next.classList.remove('follow-next');
     if (follow.swapDirty) { follow.swapDirty = false; scheduleFollowRender(); }

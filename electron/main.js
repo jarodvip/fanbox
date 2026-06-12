@@ -361,7 +361,19 @@ function startWatch(dir) {
     // macOS(FSEvents)/Windows 原生递归；Linux 递归不可靠，降级为非递归监听当前目录
     const recursive = process.platform !== 'linux';
     const w = fs.watch(dir, { persistent: false, recursive }, (evt, filename) => {
-      if (win && !win.isDestroyed()) win.webContents.send('fs:changed', { dir, filename: filename ? filename.toString() : null });
+      if (!win || win.isDestroyed()) return;
+      const name = filename ? filename.toString() : null;
+      // FSEvents 连「文件只是被读了一下」（atime/元数据更新）都报：agent cat/Read 个文件、
+      // Spotlight 扫一遍都会触发。mtime/ctime 都不新鲜 = 内容根本没动过，丢弃；
+      // stat 失败 = 刚被删，是真变更，照常转发
+      if (name) {
+        try {
+          const st = fs.statSync(path.join(dir, name));
+          const now = Date.now();
+          if (now - st.mtimeMs > 3000 && now - st.ctimeMs > 3000) return;
+        } catch { /* 已删除/无权限：当真变更转发 */ }
+      }
+      win.webContents.send('fs:changed', { dir, filename: name });
     });
     watchers.set(dir, w);
   } catch { /* 无权限等，跳过该目录 */ }
