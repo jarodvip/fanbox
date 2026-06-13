@@ -3274,6 +3274,7 @@ function setFileFollow(on, offMsg) {
   follow.on = on;
   $('#file-follow')?.classList.toggle('on', on);
   clearTimeout(follow.timers.sw); clearTimeout(follow.timers.rd);
+  stopFollowNarration(); // 清掉上一轮旁白轮询（interval 不能靠下面的 timers={} 回收）
   follow.timers = {};
   follow.path = null; follow.pendingPath = null; follow.lastContent = null;
   follow.swapping = false; follow.swapDirty = false;
@@ -3282,6 +3283,7 @@ function setFileFollow(on, offMsg) {
   toast(on ? (follow.label ? `文件跟随已开 · 盯着「${follow.label}」这个终端` : '文件跟随已开：agent 改哪个文件就看哪个') : (offMsg || '文件跟随已停'));
   // 一开就有得看：5 分钟内有过范围内的变更就直接跟上，不用干等 agent 下一笔
   if (on) {
+    startFollowNarration(); // 底部过程旁白：实时说 agent 在干嘛
     const recent = state.changeLog.find((c) => Date.now() - c.ts < 300000 && inFollowScope(c.path));
     if (recent) followSwitch(recent.path);
   }
@@ -3410,6 +3412,53 @@ function followBadge(e) {
   const where = follow.label ? `<span class="live-where">${escapeHtml(follow.label)}</span>` : '';
   $('#preview-title').innerHTML = `<span class="live-badge${art ? ' done' : ''}"><i></i>${art ? '已生成' : '跟随中'}</span>${where}${escapeHtml(e.name)}`;
 }
+// ===== 阶段二「过程旁白」：结果是主视图，底部一行实时说 agent 此刻在干嘛 =====
+// 工具调用动词 → 人话（Claude Code 2.x 工具行：「⏺ Update(file)」「⏺ Bash(cmd)」「⏺ Web Search(q)」…）
+const ACTION_VERB = { Read: '读', Edit: '写', Update: '写', Write: '写', MultiEdit: '写', NotebookEdit: '写',
+  Bash: '跑', Grep: '搜', Glob: '找', Search: '搜', Task: '子任务', TodoWrite: '理清单', Fetch: '抓取' };
+// 从绑定终端的输出尾巴里捞最近一条「干了什么」。尽量稳健：认 ⏺/● 圆点工具行，认 Web Search，
+// 都没有就看是不是在思考（页脚挂着 esc to interrupt）。提炼失败返回空串（旁白只显示文件侧）。
+function latestAgentAction(s) {
+  const txt = term.tailText(s, 40);
+  if (!txt) return '';
+  const lines = txt.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const ln = lines[i];
+    let m = ln.match(/(?:web\s*search|websearch)[\s(:]+["“]?([^"”)\n]{1,40})/i);
+    if (m) return '联网搜 ' + m[1].trim();
+    m = ln.match(/[⏺●·]\s*([A-Z][A-Za-z]+)\s*\(([^)]*)\)/);
+    if (m) {
+      const verb = ACTION_VERB[m[1]] || m[1];
+      let arg = (m[2] || '').trim().replace(/^["']|["']$/g, '');
+      if (['读', '写'].includes(verb) && arg.includes('/')) arg = baseOf(arg);
+      if (arg.length > 30) arg = arg.slice(0, 30) + '…';
+      return arg ? `${verb} ${arg}` : verb;
+    }
+  }
+  if (/esc to interrupt/i.test(txt)) return '思考中…';
+  return '';
+}
+function renderFollowNarration() {
+  const el = $('#follow-narration');
+  if (!el) return;
+  if (!follow.on) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  const s = follow.sid && typeof term !== 'undefined' ? term.sessions.find((x) => x.id === follow.sid) : null;
+  const busy = !!(s && (s.status === 'busy' || Date.now() - (s.lastData || 0) < 8000));
+  const action = s ? latestAgentAction(s) : '';
+  // 结果已在主视图 + 标题徽标里；这条只说「过程」：优先 agent 的终端动作，
+  // 没动作就退回「在写哪个文件」，agent 闲下来则报一句平静的收尾。
+  let main, live = busy;
+  if (busy && action) main = action;
+  else if (busy && follow.path) main = (isFollowArtifact(baseOf(follow.path)) ? '生成 ' : '写 ') + baseOf(follow.path);
+  else if (action && action !== '思考中…') main = action; // 刚停手，留住最后动作
+  else { main = follow.path ? '停在 ' + baseOf(follow.path) : ''; live = false; }
+  if (!main) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  const lead = live ? 'agent 正在 ' : '';
+  el.innerHTML = `<span class="fn-dot${live ? ' live' : ''}"></span>${escapeHtml(lead)}<span class="fn-term">${escapeHtml(main)}</span>`;
+}
+function startFollowNarration() { stopFollowNarration(); follow.timers.narr = setInterval(renderFollowNarration, 1200); renderFollowNarration(); }
+function stopFollowNarration() { if (follow.timers.narr) { clearInterval(follow.timers.narr); follow.timers.narr = null; } const el = $('#follow-narration'); if (el) { el.classList.add('hidden'); el.innerHTML = ''; } }
 // 找出新内容相对旧内容的变动行区间（首尾共同前后缀夹逼，够准且 O(n)）
 function changedRange(oldStr, newStr) {
   const a = oldStr.split('\n'), b = newStr.split('\n');
