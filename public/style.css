@@ -430,7 +430,7 @@ kbd {
 .fav-btn svg { vertical-align: middle; display: block; }
 .preview-actions button:hover { border-color: var(--accent); }
 .preview-actions button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
-.preview-foot { display: flex; flex-wrap: wrap; gap: 14px; padding: 8px 16px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-faint); background: var(--bg-2); }
+.preview-foot { display: flex; flex-wrap: wrap; gap: 14px; padding: 8px 16px; font-size: 11px; color: var(--text-faint); background: var(--bg-2); }
 .preview-foot:empty { display: none; }
 .preview-body { flex: 1; overflow: auto; padding: 16px; }
 .preview-body img, .preview-body video { max-width: 100%; border-radius: 8px; }
@@ -522,7 +522,6 @@ kbd {
   display: flex; justify-content: space-between; align-items: center; gap: 10px;
   padding: 5px 16px; font-size: 11.5px; color: var(--text-faint);
   background: color-mix(in srgb, var(--bg) 86%, transparent); backdrop-filter: blur(6px);
-  border-top: 1px solid var(--border);
 }
 #statusbar a { color: var(--text-dim); cursor: pointer; }
 #statusbar a:hover { color: var(--accent); }
