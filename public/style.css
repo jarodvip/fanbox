@@ -892,6 +892,11 @@ kbd {
 /* 产物徽标：已生成 = 静止的实心点，不跳动（区别于实时跟随的脉冲） */
 .live-badge.done { color: var(--text-dim); background: var(--bg-2); }
 .live-badge.done i { background: var(--text-dim); animation: none; }
+/* 跟随中绑定的是哪个项目/agent：徽标后跟一枚小标签 */
+.live-where { margin-right: 8px; padding: 1px 7px; border-radius: 99px; font-size: 10px; font-weight: 600; color: var(--text-dim); background: var(--bg-2); flex-shrink: 0; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 文件跟随正盯着的终端 tab：描边高亮 + 眼睛标记 */
+.term-tab.following { box-shadow: inset 0 0 0 1px var(--accent); }
+.term-tab .tab-eye { display: inline-flex; align-items: center; color: var(--accent); margin: 0 1px; }
 /* 产物卡片：agent 编译/打包出的成品 */
 .artifact-card .art-name { font-size: 15px; font-weight: 600; color: var(--text); word-break: break-all; margin-bottom: 4px; }
 .artifact-card .art-sub { font-size: 12px; color: var(--text-faint); margin-bottom: 16px; }

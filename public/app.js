@@ -33,6 +33,7 @@ const SVG = {
   inbox: '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
   globe: '<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
   gitbranch: '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
+  eye: '<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/>',
   maximize: '<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>',
   minimize: '<polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/>',
   // 高辨识度文件类型图标
@@ -2681,12 +2682,14 @@ const term = {
     this.sessions.forEach((s) => {
       const t = document.createElement('div');
       const dotState = s.dead ? 'dead' : (s.status === 'busy' ? 'busy' : 'idle');
-      t.className = 'term-tab' + (s.id === this.active ? ' active' : '') + (s.unread ? ' unread' : '');
+      const followed = follow.on && follow.sid === s.id; // 文件跟随正盯着这个 tab
+      t.className = 'term-tab' + (s.id === this.active ? ' active' : '') + (s.unread ? ' unread' : '') + (followed ? ' following' : '');
       const dotTitle = s.dead ? '进程已退出' : (s.status === 'busy' ? 'agent 运行中' : '空闲');
       // 终端图标按项目路径染色：同项目同色，和面包屑的配对色点呼应
       const hue = this.hueOf(s.cwd || s.startDir);
-      t.title = '双击：文件区跳到该终端所在目录';
-      t.innerHTML = `<span class="tab-dot ${dotState}" title="${dotTitle}"></span>${ic('term', `hsl(${hue} 62% 48%)`, 12)}<span>${escapeHtml(s.title)}</span><span class="tab-x" title="关闭">✕</span>`;
+      t.title = followed ? '文件跟随正盯着这个终端 · 双击跳到它所在目录' : '双击：文件区跳到该终端所在目录';
+      const eye = followed ? `<span class="tab-eye" title="文件跟随盯着它">${ic('eye', 'currentColor', 11)}</span>` : '';
+      t.innerHTML = `<span class="tab-dot ${dotState}" title="${dotTitle}"></span>${eye}${ic('term', `hsl(${hue} 62% 48%)`, 12)}<span>${escapeHtml(s.title)}</span><span class="tab-x" title="关闭">✕</span>`;
       t.onclick = (e) => { if (e.target.classList.contains('tab-x')) { this.closeTab(s.id); return; } this.activate(s.id); };
       t.ondblclick = (e) => { if (e.target.classList.contains('tab-x')) return; this.locateCwd(); };
       bar.appendChild(t);
@@ -3223,6 +3226,7 @@ function kindFromName(p) {
 const follow = {
   on: false,
   sid: null,         // 开启时绑定的终端会话 id——只跟这个 agent 项目目录里的写入
+  label: '',         // 绑定终端的项目名，给 UI 显示「在跟哪个 agent」
   path: null,        // 正在跟随的文件（绝对路径）
   lastContent: null, // 上次渲染的文本内容，用于定位本次改动行
   pendingPath: null, // 节流窗口内最新的待切换目标
@@ -3250,17 +3254,27 @@ function isFollowArtifact(name) {
 }
 function setFileFollow(on, offMsg) {
   if (follow.on === on) return;
+  // 开启：把跟随死死锚定到一个活着的终端 tab——只盯这个 agent，别的 tab 一律不串。
+  // 桌面有终端却没有活动 tab 时直接拒绝（否则退化成「全文件系统跟随」，正是要根治的乱源）。
+  if (on && typeof term !== 'undefined' && term.available()) {
+    const sid = term.sessions.some((x) => x.id === term.active) ? term.active : null;
+    if (!sid) { toast('先点开一个终端 tab，跟随才知道盯哪个 agent', true); $('#file-follow')?.classList.remove('on'); return; }
+    follow.sid = sid;
+    const s = term.sessions.find((x) => x.id === sid);
+    if (s) term.refreshCwd(s, true).catch(() => {}); // 立刻校准 cwd，scope 从第一笔就准（不靠回车后的延迟轮询）
+    follow.label = s ? (baseOf(s.cwd || s.startDir || '') || s.title || '') : '';
+  } else {
+    follow.sid = null; follow.label = ''; // 浏览器版无终端：维持旧口径（全跟）
+  }
   follow.on = on;
-  // 跟随绑定开启那一刻的活动终端 tab：切到别的 tab，其他 agent 的写入不跟
-  //（term.active 可能是关完所有标签后的残留 id，必须确认会话还活着才绑）
-  follow.sid = (on && typeof term !== 'undefined' && term.sessions.some((x) => x.id === term.active)) ? term.active : null;
   $('#file-follow')?.classList.toggle('on', on);
   clearTimeout(follow.timers.sw); clearTimeout(follow.timers.rd);
   follow.timers = {};
   follow.path = null; follow.pendingPath = null; follow.lastContent = null;
   follow.swapping = false; follow.swapDirty = false;
+  if (typeof term !== 'undefined') term.renderTabs(); // 给绑定的 tab 标上/撤掉「跟随中」标记
   if (!on) $('#preview-title')?.querySelector('.live-badge')?.remove(); // 留住最后画面，只摘掉「跟随中」
-  toast(on ? '文件跟随已开：agent 改哪个文件就看哪个' : (offMsg || '文件跟随已停'));
+  toast(on ? (follow.label ? `文件跟随已开 · 盯着「${follow.label}」这个终端` : '文件跟随已开：agent 改哪个文件就看哪个') : (offMsg || '文件跟随已停'));
   // 一开就有得看：5 分钟内有过范围内的变更就直接跟上，不用干等 agent 下一笔
   if (on) {
     const recent = state.changeLog.find((c) => Date.now() - c.ts < 300000 && inFollowScope(c.path));
@@ -3275,10 +3289,18 @@ function followScopeRoot() {
   return (s.cwd || s.startDir || '').replace(/\/$/, '') || null;
 }
 function inFollowScope(full) {
-  if (!follow.sid) return true;
+  if (!follow.sid) return typeof term === 'undefined' || !term.available(); // 只有无终端(浏览器)才全跟；桌面没绑=不跟
   const root = followScopeRoot();
   if (!root) return false;
   return full === root || full.startsWith(root + '/');
+}
+// 归属硬化：文件事件本身不带「谁写的」，靠「绑定 tab 此刻在不在干活」消歧。
+// 别的 tab 在重叠目录里写东西时，绑定 tab 多半是空闲的，于是这笔不会被误当成它的产出。
+function boundAgentActive() {
+  if (!follow.sid || typeof term === 'undefined') return true; // 没绑(浏览器降级)不设此关
+  const s = term.sessions.find((x) => x.id === follow.sid);
+  if (!s) return false;
+  return s.status === 'busy' || (Date.now() - (s.lastData || 0) < 8000);
 }
 // 看头优先级：html/md 这种「写给人看的」> 代码 > 其它（图片/数据）> 产物（二进制/压缩包，最不该抢屏）
 const followPrio = (p) => isFollowArtifact(p) ? 0 : ((isHtmlName(p) || isMdName(p)) ? 3 : (kindFromName(p) === 'text' ? 2 : 1));
@@ -3292,6 +3314,7 @@ function followChange(dir, sub) {
   }
   const full = dir.replace(/\/$/, '') + '/' + sub;
   if (!inFollowScope(full)) return; // 别的项目/别的 App 写的文件，不归这次跟随管
+  if (!boundAgentActive()) return;  // 绑定的 agent 此刻没在干活——这笔多半是别的 tab 写的，不抢屏
   if (full === follow.path) { scheduleFollowRender(); return; }
   if (dirtyCheck || autosaveFlush || imgEditState) return; // 编辑器开着就不抢屏，等用户收工
   // 已排队的目标更值得看（html/md）时，不被低优先级写入顶掉
@@ -3379,7 +3402,8 @@ function followArtifactCard(e) {
 }
 function followBadge(e) {
   const art = isFollowArtifact(e.name);
-  $('#preview-title').innerHTML = `<span class="live-badge${art ? ' done' : ''}"><i></i>${art ? '已生成' : '跟随中'}</span>${escapeHtml(e.name)}`;
+  const where = follow.label ? `<span class="live-where">${escapeHtml(follow.label)}</span>` : '';
+  $('#preview-title').innerHTML = `<span class="live-badge${art ? ' done' : ''}"><i></i>${art ? '已生成' : '跟随中'}</span>${where}${escapeHtml(e.name)}`;
 }
 // 找出新内容相对旧内容的变动行区间（首尾共同前后缀夹逼，够准且 O(n)）
 function changedRange(oldStr, newStr) {
