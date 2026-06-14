@@ -2,7 +2,7 @@
 
 # 📦 FanBox
 
-<img src="assets/promo-banner.png" alt="FanBox · Coding Agent 的驾驶舱" width="100%">
+<img src="assets/promo-banner.jpg" alt="FanBox · Coding Agent 的驾驶舱" width="100%">
 
 <br><br>
 
@@ -16,8 +16,8 @@
 
 <br>
 
-**看得见的 vibe coding：AI 在你电脑上飞快干活，你看清它碰过的每个文件、改过的每一行，随时接手。**<br>
-**Vibe coding you can actually see: watch every file and line the AI changes on your machine, and take over anytime.**
+**FanBox：Coding Agent 的驾驶舱。指挥 Claude Code、Codex 在本地干活，看清它碰过的每个文件、改过的每一行，随时接手。**<br>
+**FanBox — the cockpit for coding agents: command Claude Code or Codex, see every file and line they change, and take over anytime.**
 
 <br>
 

@@ -1,7 +1,7 @@
 {
   "name": "fanbox",
   "version": "1.11.0",
-  "description": "FanBox — vibe coding you can actually see. Watch every file and line the AI changes on your machine, and take over anytime.",
+  "description": "FanBox — the cockpit for coding agents. Command Claude Code or Codex, watch every file and line they change, and take over anytime.",
   "bin": {
     "fanbox": "server.js"
   },
